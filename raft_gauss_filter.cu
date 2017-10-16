@@ -1,44 +1,3 @@
-/*
-    Henrique Machado Gonçalves - 09/2017
-    LNLS - CNPEM : Campinas - São Paulo - Brasil.
-
-    This code is a implementation of a gaussian convolution filter using
-    separable kernels to optimize the computer performance.
-
-
-    This program was made using techniques specifically
-    for the Pascal architecture of NVIDIA cards. The data acess policy
-    might change in others types of architecture.
-
-    The high-priority recommendations are as follows:
-      Find ways to parallelize sequential code,
-      Minimize data transfers between the host and the device,
-      Adjust kernel launch configuration to maximize device utilization,
-      Ensure global memory accesses are coalesced,
-      Minimize redundant accesses to global memory whenever possible,
-      Avoid long sequences of diverged execution by threads within the same warp.
-
-      The Pascal Streaming Multiprocessor (SM) is in many respects similar to that of Maxwell.
-
-      This architecture have HBM2 memories provide dedicated ECC resources,
-      allowing overhead-free ECC protection, there is no need to turn off
-      SECDED for performance enhancement.
-
-      By default, GP100 caches global loads in the L1/Texture cache.
-      Which acts as a coalescing buffer for memory acesses. If you are
-      currently using an GP104 use -Xptxas -dlcm=ca flag to nvcc at compile time
-
-      Is no longer necessary to turn off L1 caching
-      in order to reduce wasted global memory transactions
-      associated with uncoalesced accesses.
-      Two new device attributes were added in CUDA Toolkit 6.0:
-       -globalL1CacheSupported and localL1CacheSupported.
-
-      The cudaDeviceEnablePeerAccess() API call remains necessary
-      to enable direct transfers (over either PCIe or NVLink) between GPUs.
-      The cudaDeviceCanAccessPeer() can be used to determine if peer access
-      is possible between any pair of GPUs.
-*/
 #include <math.h>
 
 #include "raft_filter.h"
@@ -145,7 +104,7 @@ static int imin( int a, int b )
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 
-float raft_gaussian_3D_function(raft_fimage *gaussian_kernel, float sigma, int i){
+__host__ float raft_gaussian_3D_function(raft_fimage *gaussian_kernel, float sigma, int i){
 
     float exponent, exponentiation, func_gauss;
     exponent=(RAFT_SQUARE((raft_get_xcoord(gaussian_kernel, i)-(gaussian_kernel->xsize/2)))+RAFT_SQUARE((raft_get_ycoord(gaussian_kernel, i)-(gaussian_kernel->ysize/2)))+RAFT_SQUARE((raft_get_zcoord(gaussian_kernel, i)-(gaussian_kernel->zsize/2))) )/ (2*RAFT_SQUARE(sigma));
@@ -154,7 +113,7 @@ float raft_gaussian_3D_function(raft_fimage *gaussian_kernel, float sigma, int i
 
     return func_gauss;
 }
-raft_fimage *raft_3D_gaussian_kernel(int kernel_xsize, int kernel_ysize, int kernel_zsize, float sigma){
+__host__ raft_fimage *raft_3D_gaussian_kernel(int kernel_xsize, int kernel_ysize, int kernel_zsize, float sigma){
 
     raft_fimage *gaussian_kernel = raft_create_fimage(kernel_xsize,kernel_ysize,kernel_zsize);
     float kernel_normalization = 0;
@@ -895,19 +854,17 @@ void convolutionZ_15( float *d_Dst, float *d_Src, int imageW, int imageH, int im
 
     convolutionZ_Kernel_15<<<blocks, threads,stream>>>( d_Dst, d_Src, imageW, imageH, imageD,c_Kernel);
 }
-int main(float sigma)
+
+
+__host__ float raft_gauss_filter(float *d_image,float *d_out_image, int image_sizex,int image_sizey,int image_sizez, float sigma)
 {
-    //time variables
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  float milliseconds = 0;
-	//sigma define which kernel we are going to apply in the image
+  //sigma define which kernel we are going to apply in the image
 	int kernel_type = 0;
-  float *d_gaussian_kernelx,*d_gaussian_kernely,*d_gaussian_kernelz, *d_image, *d_out_image;
+  float *d_gaussian_kernelx,*d_gaussian_kernely,*d_gaussian_kernelz;
 	raft_fimage *gaussian_kernelx;
 	raft_fimage *gaussian_kernely;
 	raft_fimage *gaussian_kernelz;
+	//check the kernel size using the sigma value
 	if(sigma * 4 <= 3.0 )
 	{
 		kernel_type = 3;
@@ -920,8 +877,7 @@ int main(float sigma)
 	{
 		kernel_type = 31;
 	}
-
-  raft_fimage *image = raft_fread_raw_slices("slice_", 1000, 1049, 2048, 2048);
+	//create kernel using the especific size given by sigma
 	if (kernel_type == 3)
 	{
 		gaussian_kernelx = raft_3D_gaussian_kernel(KERNEL_LENGTH_3,1,1,sigma);
@@ -940,80 +896,54 @@ int main(float sigma)
 		gaussian_kernely = raft_3D_gaussian_kernel(1,KERNEL_LENGTH_31,1,sigma);
 		gaussian_kernelz = raft_3D_gaussian_kernel(1,1,KERNEL_LENGTH_31,sigma);
 	}
-
-  raft_fimage *out_image = raft_create_fimage(image->xsize, image->ysize, image->zsize);
-
+	//allocating device memory for kernels
   d_gaussian_kernelx = raft_cuda_alloc_float_array(gaussian_kernelx->n, false, false);
   d_gaussian_kernely = raft_cuda_alloc_float_array(gaussian_kernely->n, false, false);
   d_gaussian_kernelz = raft_cuda_alloc_float_array(gaussian_kernelz->n, false, false);
-  d_image = raft_cuda_alloc_float_array(image->n, false, false);
-  d_out_image = raft_cuda_alloc_float_array(out_image->n, false, false );
-
   //create cuda Streams
-  cudaStream_t stream[5];
+  cudaStream_t stream[3];
   cudaStreamCreateWithFlags(&stream[0],cudaStreamNonBlocking);
   cudaStreamCreateWithFlags(&stream[1],cudaStreamNonBlocking);
   cudaStreamCreateWithFlags(&stream[2],cudaStreamNonBlocking);
-  cudaStreamCreateWithFlags(&stream[3],cudaStreamNonBlocking);
-  cudaStreamCreateWithFlags(&stream[4],cudaStreamNonBlocking);
-  cudaEventRecord(start);
-
-  cudaMemcpyAsync(d_image, image->val, image->n*sizeof(float), cudaMemcpyHostToDevice,stream[0]);
-  cudaMemcpyAsync(d_out_image, out_image->val, out_image->n*sizeof(float), cudaMemcpyHostToDevice,stream[1]);
-  cudaMemcpyAsync(d_gaussian_kernelx, gaussian_kernelx->val, gaussian_kernelx->n*sizeof(float), cudaMemcpyHostToDevice,stream[2]);
-  cudaMemcpyAsync(d_gaussian_kernely, gaussian_kernely->val, gaussian_kernely->n*sizeof(float), cudaMemcpyHostToDevice,stream[3]);
-  cudaMemcpyAsync(d_gaussian_kernelz, gaussian_kernelz->val, gaussian_kernelz->n*sizeof(float), cudaMemcpyHostToDevice,stream[4]);
-
+	//Asynchronous copy
+  cudaMemcpyAsync(d_gaussian_kernelx, gaussian_kernelx->val, gaussian_kernelx->n*sizeof(float), cudaMemcpyHostToDevice,stream[0]);
+  cudaMemcpyAsync(d_gaussian_kernely, gaussian_kernely->val, gaussian_kernely->n*sizeof(float), cudaMemcpyHostToDevice,stream[1]);
+  cudaMemcpyAsync(d_gaussian_kernelz, gaussian_kernelz->val, gaussian_kernelz->n*sizeof(float), cudaMemcpyHostToDevice,stream[2]);
+	//Synchronize
   cudaDeviceSynchronize();
-
+	//verify which kernel size we are going to use
 	if(kernel_type == 3)
 	{
-		convolutionX_3( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelx,&stream[0]);
-		convolutionY_3( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernely,&stream[1]);
-		convolutionZ_3( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelz,&stream[2]);
+		convolutionX_3( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelx,&stream[0]);
+		convolutionY_3( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernely,&stream[1]);
+		convolutionZ_3( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelz,&stream[2]);
 	}
 	if(kernel_type == 15)
 	{
-		convolutionX_15( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelx,&stream[0]);
-		convolutionY_15( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernely,&stream[1]);
-		convolutionZ_15( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelz,&stream[2]);
+		convolutionX_15( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelx,&stream[0]);
+		convolutionY_15( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernely,&stream[1]);
+		convolutionZ_15( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelz,&stream[2]);
 	}
 	if(kernel_type == 31)
 	{
-		convolutionX_31( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelx,stream[0]);
-		convolutionY_31( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernely,stream[1]);
-		convolutionZ_31( d_out_image, d_image, image->xsize,image->ysize,image->zsize,d_gaussian_kernelz,stream[2]);
+		convolutionX_31( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelx,stream[0]);
+		convolutionY_31( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernely,stream[1]);
+		convolutionZ_31( d_out_image, d_image, image_sizex,image_sizey,image_sizez,d_gaussian_kernelz,stream[2]);
 	}
-
+	//wait for gpu computation
   cudaDeviceSynchronize();
+	//destroy streams
   cudaStreamDestroy(stream[0]);
   cudaStreamDestroy(stream[1]);
   cudaStreamDestroy(stream[2]);
-  cudaStreamDestroy(stream[3]);
-  cudaStreamDestroy(stream[4]);
+	//destrou images
   raft_destroy_fimage(&gaussian_kernelz);
   raft_destroy_fimage(&gaussian_kernely);
   raft_destroy_fimage(&gaussian_kernelx);
-  cudaEventRecord(stop);
-
-  cudaMemcpy(out_image->val, d_out_image, out_image->n*sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&milliseconds, start, stop);
-
-  printf("The time of executation on GPU was: %.2f \n",milliseconds);
-
-  raft_fwrite_raw_image(out_image, "out_optimized3_slice.b");
-
-  raft_destroy_fimage(&image);
-  //raft_destroy_fimage(&gaussian_kernel);
-  raft_destroy_fimage(&out_image);
-
+	//free device memory
   cudaFree(d_gaussian_kernelx);
   cudaFree(d_gaussian_kernely);
   cudaFree(d_gaussian_kernelz);
-  cudaFree(d_image);
-  cudaFree(d_out_image);
 
   return 0;
 }
