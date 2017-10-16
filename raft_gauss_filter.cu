@@ -1,3 +1,44 @@
+/*
+    Henrique Machado Gonçalves - 09/2017
+    LNLS - CNPEM : Campinas - São Paulo - Brasil.
+
+    This code is a implementation of a gaussian convolution filter using
+    separable kernels to optimize the computer performance.
+
+
+    This program was made using techniques specifically
+    for the Pascal architecture of NVIDIA cards. The data acess policy
+    might change in others types of architecture.
+
+    The high-priority recommendations are as follows:
+      Find ways to parallelize sequential code,
+      Minimize data transfers between the host and the device,
+      Adjust kernel launch configuration to maximize device utilization,
+      Ensure global memory accesses are coalesced,
+      Minimize redundant accesses to global memory whenever possible,
+      Avoid long sequences of diverged execution by threads within the same warp.
+
+      The Pascal Streaming Multiprocessor (SM) is in many respects similar to that of Maxwell.
+
+      This architecture have HBM2 memories provide dedicated ECC resources,
+      allowing overhead-free ECC protection, there is no need to turn off
+      SECDED for performance enhancement.
+
+      By default, GP100 caches global loads in the L1/Texture cache.
+      Which acts as a coalescing buffer for memory acesses. If you are
+      currently using an GP104 use -Xptxas -dlcm=ca flag to nvcc at compile time
+
+      Is no longer necessary to turn off L1 caching
+      in order to reduce wasted global memory transactions
+      associated with uncoalesced accesses.
+      Two new device attributes were added in CUDA Toolkit 6.0:
+       -globalL1CacheSupported and localL1CacheSupported.
+
+      The cudaDeviceEnablePeerAccess() API call remains necessary
+      to enable direct transfers (over either PCIe or NVLink) between GPUs.
+      The cudaDeviceCanAccessPeer() can be used to determine if peer access
+      is possible between any pair of GPUs.
+*/
 #include <math.h>
 
 #include "raft_filter.h"
